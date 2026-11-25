@@ -14,13 +14,15 @@ internal static class ConfigReader
 
 	public static LaunchConfig? Read()
 	{
+		string? processPath = Environment.ProcessPath;
+		return processPath == null ? null : Read(processPath);
+	}
+
+	// İstənilən faylın sonundakı imtahan konfiqurasiyasını oxuyur (exe-nin başqa nüsxələrini tanımaq üçün də)
+	public static LaunchConfig? Read(string processPath)
+	{
 		try
 		{
-			string processPath = Environment.ProcessPath;
-			if (processPath == null)
-			{
-				return null;
-			}
 			using FileStream fileStream = new FileStream(processPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 			if (fileStream.Length < 64)
 			{

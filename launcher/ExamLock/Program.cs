@@ -56,7 +56,7 @@ internal static class Program
 				return 1;
 			}
 			Api api = new Api(launchConfig);
-			StartForm startForm = new StartForm(api);
+			StartForm startForm = new StartForm(api, launchConfig);
 			Application.Run(startForm);
 			LaunchInfo launched = startForm.Launched;
 			if ((object)launched == null)
@@ -71,7 +71,7 @@ internal static class Program
 			if (examForm.FinishedNormally)
 			{
 				MessageBox.Show("İmtahandan çıxdınız. Nəticəniz müəllimə göndərildi.\n\nİmtahan proqramı bu kompüterdən avtomatik silinir.", "İmtahan bitdi", MessageBoxButtons.OK, MessageBoxIcon.Asterisk);
-				SelfDelete.Schedule();
+				SelfDelete.Schedule(launchConfig);
 			}
 			return 0;
 		}

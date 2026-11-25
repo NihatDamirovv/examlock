@@ -29,9 +29,12 @@ internal sealed class StartForm : Form
 
 	public LaunchInfo? Launched { get; private set; }
 
-	public StartForm(Api api)
+	private readonly LaunchConfig cfg;
+
+	public StartForm(Api api, LaunchConfig cfg)
 	{
 		this.api = api;
+		this.cfg = cfg;
 		Text = "İmtahan";
 		Font = new Font("Segoe UI", 10f);
 		StartPosition = FormStartPosition.CenterScreen;
@@ -125,7 +128,7 @@ internal sealed class StartForm : Form
 				start.BackColor = Color.FromArgb(156, 163, 175);
 				FormClosed += (object? _, FormClosedEventArgs _) =>
 				{
-					SelfDelete.Schedule();
+					SelfDelete.Schedule(cfg);
 				};
 			}
 			else if (!flag)

@@ -72,6 +72,8 @@ internal sealed class ExamForm : Form
 
 	private readonly Button langButton = MakeButton("⌨  AZ", Color.FromArgb(55, 65, 81));
 
+	private readonly Button backButton = MakeButton("←  Geri", Color.FromArgb(55, 65, 81));
+
 	public bool FinishedNormally { get; private set; }
 
 	public ExamForm(Api api, LaunchConfig cfg, LaunchInfo info)
@@ -162,7 +164,29 @@ internal sealed class ExamForm : Form
 			await QuitAsync();
 		};
 		flowLayoutPanel.Controls.AddRange(status, clock, langButton, button, button2);
+		// Sol yuxarı: «Geri» — yalnız imtahan saytının öz səhifələri arasında (qadağan saytlar tarixçəyə heç düşmür)
+		FlowLayoutPanel leftPanel = new FlowLayoutPanel
+		{
+			Dock = DockStyle.Left,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			WrapContents = false,
+			Padding = new Padding(0, 7, 10, 0)
+		};
+		backButton.Margin = new Padding(0, 0, 4, 0);
+		backButton.Enabled = false;
+		backButton.Click += (object? _, EventArgs _) =>
+		{
+			CoreWebView2? core = web.CoreWebView2;
+			if (!cleaned && core != null && core.CanGoBack)
+			{
+				core.GoBack();
+			}
+			web.Focus();
+		};
+		leftPanel.Controls.Add(backButton);
 		panel.Controls.Add(value);
+		panel.Controls.Add(leftPanel);
 		panel.Controls.Add(flowLayoutPanel);
 		return panel;
 	}
@@ -290,7 +314,11 @@ internal sealed class ExamForm : Form
 				ReportBlocked(e.Uri);
 			}
 		};
-		core.DownloadStarting += (object? _, CoreWebView2DownloadStartingEventArgs e) =>
+		core.HistoryChanged += (object? _, object _) =>
+		{
+			backButton.Enabled = core.CanGoBack;
+		};
+		core.DownloadStarting +=(object? _, CoreWebView2DownloadStartingEventArgs e) =>
 		{
 			e.Cancel = true;
 		};
