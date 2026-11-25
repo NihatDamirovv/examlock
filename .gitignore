@@ -1,0 +1,9 @@
+node_modules/
+data/
+.npm/
+*.db
+*.db-*
+secret.key
+.env*
+*.pem
+bin/*.exe

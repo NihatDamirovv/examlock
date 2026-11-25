@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>{{TITLE}} — İmtahan</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .s-wrap { max-width: 620px; margin: 0 auto; padding: 40px 16px 60px; }
+    .big { font-size: 17px; padding: 14px 22px; width: 100%; justify-content: center; margin: 18px 0 6px; }
+    ol { padding-left: 20px; margin: 8px 0 0; }
+    ol li { margin: 8px 0; }
+    .tip { background: var(--chip); border-radius: 8px; padding: 10px 14px; font-size: 14px; margin-top: 14px; }
+    body.missing .only-ok, body.inactive .only-active { display: none; }
+    .only-missing, .only-inactive { display: none; }
+    body.missing .only-missing, body.inactive .only-inactive { display: block; }
+  </style>
+</head>
+<body class="{{BODY_CLASS}}">
+  <div class="s-wrap">
+    <div class="card">
+      <p class="hint" style="margin:0">İmtahan</p>
+      <h1>{{TITLE}}</h1>
+
+      <p class="only-missing">Bu link etibarsızdır və ya imtahan silinib. Müəlliminizdən yeni link istəyin.</p>
+      <p class="only-inactive notice">İmtahan hələ açılmayıb. Faylı indi yükləyə bilərsiniz — müəllim imtahanı açanda başlaya biləcəksiniz.</p>
+
+      <div class="only-ok">
+        <a class="btn primary big" href="{{DOWNLOAD}}">⬇ İmtahan proqramını yüklə</a>
+        <p class="hint" style="text-align:center;margin:0">Windows 10 / 11 · quraşdırma tələb etmir</p>
+
+        <h3 style="margin:26px 0 0">Necə başlamaq olar</h3>
+        <ol>
+          <li>Yüklənən <b>.exe</b> faylını iki dəfə klikləyib açın.</li>
+          <li>Mavi «Windows kompüterinizi qorudu» pəncərəsi çıxsa: <b>Ətraflı</b> → <b>Hər halda işə sal</b> basın.</li>
+          <li>Adınızı yazıb <b>İmtahana başla</b> düyməsini basın.</li>
+          <li>Klaviatura dilini dəyişmək üçün yuxarıdakı <b>⌨</b> düyməsini və ya <b>Win+Space</b> / <b>Alt+Shift</b> basın.</li>
+          <li>İmtahanı bitirib cavabları göndərdikdən sonra yuxarıdakı <b>Çıxış</b> düyməsini basın. Proqram kompüterdən avtomatik silinəcək.</li>
+        </ol>
+        <div class="tip">
+          İmtahan zamanı başqa proqram, sayt, ekran görüntüsü və kopyalama bağlıdır. Hər cəhd müəllimə avtomatik bildirilir.
+          Başlamazdan əvvəl açıq işlərinizi yadda saxlayın — brauzer, Telegram, WhatsApp və s. avtomatik bağlanacaq.
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

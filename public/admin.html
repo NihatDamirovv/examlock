@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ExamLock — Müəllim paneli</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+        ExamLock
+      </div>
+      <div class="spacer"></div>
+      <button id="logout" class="small" hidden>Çıxış</button>
+    </div>
+  </header>
+
+  <!-- Giriş -->
+  <section id="login-view" class="wrap" hidden>
+    <form id="login-form" class="card login">
+      <h1>Müəllim paneli</h1>
+      <label class="f" for="login-pw">Şifrə</label>
+      <input id="login-pw" type="password" autocomplete="current-password" required>
+      <div class="error" id="login-error"></div>
+      <button class="primary" style="width:100%;justify-content:center">Daxil ol</button>
+    </form>
+  </section>
+
+  <!-- İmtahanlar -->
+  <main id="app-view" class="wrap" hidden>
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px">
+      <div style="flex:1;min-width:240px">
+        <h1>İmtahanlar</h1>
+        <p class="sub" style="margin:0">İmtahan yaradın, faylı yükləyib tələbələrə göndərin və ya linki paylaşın.</p>
+      </div>
+      <button id="new-exam" class="primary">+ Yeni imtahan</button>
+    </div>
+    <div id="notices"></div>
+    <div id="exam-list" class="list"></div>
+  </main>
+
+  <!-- Yarat / Redaktə -->
+  <dialog id="exam-dialog">
+    <form id="exam-form" method="dialog">
+      <div class="dlg-head"><h3 id="exam-dialog-title">Yeni imtahan</h3></div>
+      <div class="dlg-body">
+        <label class="f" for="f-title">İmtahanın adı</label>
+        <input id="f-title" type="text" maxlength="120" placeholder="Məs: Riyaziyyat — 9A, yekun" required>
+
+        <label class="f" for="f-url">İmtahan saytının linki</label>
+        <input id="f-url" type="url" placeholder="https://forms.gle/..." required>
+        <div class="hint">Google Forms, Microsoft Forms, Moodle və ya istənilən sayt. Tələbə bu linki görməyəcək.</div>
+
+        <label class="f" for="f-quit">Çıxış şifrəsi <span class="hint">(istəyə bağlı)</span></label>
+        <input id="f-quit" type="text" maxlength="100" autocomplete="off" placeholder="Boş qalsa, tələbə «Çıxış» ilə özü çıxa bilər">
+        <label class="check hint" id="f-clear-wrap" hidden><input type="checkbox" id="f-clear"> Mövcud çıxış şifrəsini sil</label>
+
+        <details style="margin-top:14px">
+          <summary style="cursor:pointer;font-weight:600">Əlavə icazəli saytlar</summary>
+          <textarea id="f-domains" placeholder="Hər sətirdə bir sayt, məs: moodle.mektebim.az"></textarea>
+          <div class="hint">İmtahan saytının özü və Google / Microsoft giriş səhifələri avtomatik icazəlidir. Qalan bütün saytlar bağlıdır.</div>
+        </details>
+
+        <label class="check"><input type="checkbox" id="f-active" checked> İmtahan aktivdir (tələbələr başlaya bilər)</label>
+        <div class="error" id="exam-error"></div>
+      </div>
+      <div class="dlg-foot">
+        <button type="button" id="exam-cancel">Ləğv et</button>
+        <button class="primary" id="exam-save">Yadda saxla</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Canlı izləmə -->
+  <dialog id="monitor-dialog" class="wide">
+    <div class="dlg-head">
+      <h3 id="monitor-title">İzləmə</h3>
+      <span class="hint" id="monitor-updated"></span>
+      <button class="small" id="monitor-close">Bağla</button>
+    </div>
+    <div class="dlg-body">
+      <div class="stats" id="monitor-stats"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tələbə</th><th>Vəziyyət</th><th>Başladı</th><th class="hide-sm">Kompüter</th><th>Pozuntu</th></tr></thead>
+          <tbody id="monitor-body"></tbody>
+        </table>
+      </div>
+      <p class="hint">Sətrə klikləyin — tələbənin bütün hərəkətləri görünəcək. Siyahı hər 5 saniyədə yenilənir.</p>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "examlock-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ExamLock — müəllim paneli və imtahan serveri",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "4.21.2"
+  }
+}
