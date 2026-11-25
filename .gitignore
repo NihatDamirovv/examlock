@@ -7,3 +7,5 @@ secret.key
 .env*
 *.pem
 bin/*.exe
+launcher/bin/
+launcher/obj/
