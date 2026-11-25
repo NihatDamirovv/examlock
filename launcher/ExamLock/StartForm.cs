@@ -126,9 +126,10 @@ internal sealed class StartForm : Form
 				start.Enabled = false;
 				name.Enabled = false;
 				start.BackColor = Color.FromArgb(156, 163, 175);
+				// Bu kompüterdə artıq bitirilib — exe-ni yığışdırırıq
 				FormClosed += (object? _, FormClosedEventArgs _) =>
 				{
-					SelfDelete.Schedule(cfg);
+					SelfDelete.RemoveSelf();
 				};
 			}
 			else if (!flag)

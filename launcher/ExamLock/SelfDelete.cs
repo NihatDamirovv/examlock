@@ -1,227 +1,116 @@
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Security.Principal;
+using System.Runtime.InteropServices;
 
 namespace ExamLock;
 
-// İmtahan bitəndən sonra proqram bu kompüterdən silinir:
-//   1) işləyən exe-nin özü (proqram bağlanandan sonra cmd ilə),
-//   2) eyni imtahanın başqa nüsxələri (Yükləmələr, Masaüstü, Sənədlər, Temp — məs. «Imtahan-X (1).exe»),
-//   3) Zibil qutusundakı (Recycle Bin) nüsxələr,
-//   4) «Son fayllar» (Recent / Quick access) qısayolları.
-// Yalnız İÇİNDƏ EYNİ İMTAHAN KODU olan exe-lər silinir — başqa fayllara toxunulmur.
+// İmtahan proqramının öz faylını kompüterdən yığışdırır.
+//
+// Windows işləyən proqramın öz exe faylını SİLMƏYƏ icazə vermir (fayl kilidlidir),
+// amma onu EYNİ QOVLUQDA başqa ada DƏYİŞMƏYƏ icazə verir. Ona görə:
+//   1) «Sil» basılanda exe öz adını gizli «.~exlkdel_*.tmp» adına dəyişir —
+//      tələbənin gördüyü «Imtahan-*.exe» dərhal Yükləmələrdən yox olur;
+//   2) gizli qalıq fayl növbəti dəfə istənilən imtahan exe-si açılanda silinir
+//      (CleanupLeftovers), çünki o an fayl işləmir və silinə bilir.
+//
+// Qeyd: işləyən faylı dərhal fiziki silmək (cmd ilə, və ya «yenidən başlayanda sil»
+// ilə) bu kompüterlərdə ya Windows Defender tərəfindən bloklanır, ya da administrator
+// icazəsi tələb edir — ona görə o yollardan istifadə olunmur. Təkrar imtahanın
+// qarşısı serverdə alınır (hər kompüterdən bir dəfə), buna görə qalıq fayl təhlükəsizdir.
 internal static class SelfDelete
 {
-	private static bool scheduled;
+	private const string LeftoverPrefix = ".~exlkdel_";
 
-	private const long MaxExeSize = 200L * 1024 * 1024;
+	private const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
 
-	public static void Schedule(LaunchConfig cfg)
-	{
-		if (scheduled)
-		{
-			return;
-		}
-		string? processPath = Environment.ProcessPath;
-		if (processPath == null)
-		{
-			return;
-		}
-		scheduled = true;
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+	private static extern bool MoveFileExW(string existing, string? newName, uint flags);
 
-		List<string> names = new List<string> { Path.GetFileName(processPath) };
-		try
-		{
-			DeleteOtherCopies(cfg.Code, processPath, names);
-		}
-		catch
-		{
-		}
-		try
-		{
-			DeleteFromRecycleBin(cfg.Code);
-		}
-		catch
-		{
-		}
-		try
-		{
-			DeleteRecentShortcuts(names);
-		}
-		catch
-		{
-		}
-
-		// İşləyən exe özünü silə bilməz — proqram bağlanandan sonra cmd silir (bir neçə cəhd)
-		string root = AppDirs.Root;
-		string extractDir = Path.Combine(Path.GetTempPath(), ".net", Path.GetFileNameWithoutExtension(processPath));
-		bool removeRoot = !File.Exists(Path.Combine(root, "restore.json"));
-		string text = $"del /f /q \"{processPath}\" 2>nul & rmdir /s /q \"{extractDir}\" 2>nul";
-		if (removeRoot)
-		{
-			text = text + " & rmdir /s /q \"" + root + "\" 2>nul";
-		}
-		string arguments = $"/d /c ping 127.0.0.1 -n 4 >nul & {text} & ping 127.0.0.1 -n 4 >nul & {text} & ping 127.0.0.1 -n 8 >nul & {text}";
-		try
-		{
-			Process.Start(new ProcessStartInfo("cmd.exe", arguments)
-			{
-				CreateNoWindow = true,
-				UseShellExecute = false,
-				WindowStyle = ProcessWindowStyle.Hidden,
-				WorkingDirectory = Path.GetTempPath()
-			});
-		}
-		catch
-		{
-		}
-	}
-
-	private static bool IsSameExam(string path, string code)
+	// «Sil» düyməsi çağırır. İşləyən exe-ni gözdən itirir; true = ad dəyişdi.
+	public static bool RemoveSelf()
 	{
 		try
 		{
-			FileInfo fi = new FileInfo(path);
-			if (!fi.Exists || fi.Length < 1024 * 1024 || fi.Length > MaxExeSize)
+			string? self = Environment.ProcessPath;
+			if (self == null || !File.Exists(self))
 			{
-				return false;
+				return true;
 			}
-			LaunchConfig? c = ConfigReader.Read(path);
-			return c != null && string.Equals(c.Code, code, StringComparison.OrdinalIgnoreCase);
+			string dir = Path.GetDirectoryName(self) ?? Path.GetTempPath();
+			string hidden = Path.Combine(dir, LeftoverPrefix + Guid.NewGuid().ToString("N") + ".tmp");
+			File.Move(self, hidden);
+			try
+			{
+				File.SetAttributes(hidden, FileAttributes.Hidden | FileAttributes.System);
+			}
+			catch
+			{
+			}
+			// Administrator olanda qalıq fayl yenidən başlayanda tam silinir (admin yoxdursa təsirsizdir).
+			try
+			{
+				MoveFileExW(hidden, null, MOVEFILE_DELAY_UNTIL_REBOOT);
+			}
+			catch
+			{
+			}
+			return true;
 		}
 		catch
 		{
+			// Ad dəyişmək alınmasa (nadir hal) — qalıq faylı sonra təmizlənsin deyə işarələyirik
 			return false;
 		}
 	}
 
-	private static void TryDelete(string path)
+	// Program başlayanda çağırılır: əvvəlki imtahanların gizli qalıq fayllarını silir.
+	public static void CleanupLeftovers()
 	{
-		try
+		foreach (string dir in CommonFolders())
 		{
-			File.SetAttributes(path, FileAttributes.Normal);
-			File.Delete(path);
-		}
-		catch
-		{
+			try
+			{
+				foreach (string f in Directory.EnumerateFiles(dir, LeftoverPrefix + "*.tmp"))
+				{
+					try
+					{
+						File.SetAttributes(f, FileAttributes.Normal);
+						File.Delete(f);
+					}
+					catch
+					{
+					}
+				}
+			}
+			catch
+			{
+			}
 		}
 	}
 
-	private static IEnumerable<string> SearchFolders()
+	private static System.Collections.Generic.IEnumerable<string> CommonFolders()
 	{
 		string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-		List<string> list = new List<string>
+		var list = new System.Collections.Generic.List<string>
 		{
 			Path.Combine(profile, "Downloads"),
 			Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
 			Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
 			Path.GetTempPath()
 		};
-		// OneDrive ilə sinxronlaşan Masaüstü / Sənədlər
 		string? oneDrive = Environment.GetEnvironmentVariable("OneDrive");
 		if (!string.IsNullOrEmpty(oneDrive))
 		{
 			list.Add(Path.Combine(oneDrive, "Desktop"));
-			list.Add(Path.Combine(oneDrive, "Documents"));
 			list.Add(Path.Combine(oneDrive, "Downloads"));
+			list.Add(Path.Combine(oneDrive, "Documents"));
 		}
-		return list.Where((string d) => !string.IsNullOrEmpty(d) && Directory.Exists(d)).Distinct(StringComparer.OrdinalIgnoreCase);
-	}
-
-	internal static void DeleteOtherCopies(string code, string self, List<string> names)
-	{
-		EnumerationOptions opts = new EnumerationOptions
+		var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		foreach (string d in list)
 		{
-			RecurseSubdirectories = true,
-			MaxRecursionDepth = 2,
-			IgnoreInaccessible = true,
-			AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System
-		};
-		foreach (string dir in SearchFolders())
-		{
-			IEnumerable<string> files;
-			try
+			if (!string.IsNullOrEmpty(d) && Directory.Exists(d) && seen.Add(d))
 			{
-				files = Directory.EnumerateFiles(dir, "*.exe", opts).ToList();
-			}
-			catch
-			{
-				continue;
-			}
-			foreach (string f in files)
-			{
-				if (string.Equals(Path.GetFullPath(f), Path.GetFullPath(self), StringComparison.OrdinalIgnoreCase))
-				{
-					continue;
-				}
-				if (IsSameExam(f, code))
-				{
-					names.Add(Path.GetFileName(f));
-					TryDelete(f);
-				}
-			}
-		}
-	}
-
-	// Zibil qutusu: X:\$Recycle.Bin\<istifadəçi SID>\$Rxxxx.exe (fayl) + $Ixxxx.exe (məlumat)
-	internal static void DeleteFromRecycleBin(string code)
-	{
-		string? sid = WindowsIdentity.GetCurrent().User?.Value;
-		if (sid == null)
-		{
-			return;
-		}
-		foreach (DriveInfo drive in DriveInfo.GetDrives())
-		{
-			if (!drive.IsReady || drive.DriveType != DriveType.Fixed && drive.DriveType != DriveType.Removable)
-			{
-				continue;
-			}
-			string bin = Path.Combine(drive.RootDirectory.FullName, "$Recycle.Bin", sid);
-			if (!Directory.Exists(bin))
-			{
-				continue;
-			}
-			string[] items;
-			try
-			{
-				items = Directory.GetFiles(bin, "$R*.exe");
-			}
-			catch
-			{
-				continue;
-			}
-			foreach (string r in items)
-			{
-				if (!IsSameExam(r, code))
-				{
-					continue;
-				}
-				TryDelete(r);
-				TryDelete(Path.Combine(bin, "$I" + Path.GetFileName(r).Substring(2)));
-			}
-		}
-	}
-
-	// «Son fayllar»: %APPDATA%\Microsoft\Windows\Recent\<fayl adı>.lnk
-	internal static void DeleteRecentShortcuts(List<string> names)
-	{
-		string recent = Environment.GetFolderPath(Environment.SpecialFolder.Recent);
-		if (string.IsNullOrEmpty(recent) || !Directory.Exists(recent))
-		{
-			return;
-		}
-		HashSet<string> wanted = new HashSet<string>(names.Select((string n) => n + ".lnk"), StringComparer.OrdinalIgnoreCase);
-		foreach (string lnk in Directory.EnumerateFiles(recent, "*.lnk"))
-		{
-			string name = Path.GetFileName(lnk);
-			// Eyni imtahanın faylı və ya ümumiyyətlə «Imtahan-*.exe» qısayolu
-			if (wanted.Contains(name) || name.StartsWith("Imtahan-", StringComparison.OrdinalIgnoreCase) && name.EndsWith(".exe.lnk", StringComparison.OrdinalIgnoreCase))
-			{
-				TryDelete(lnk);
+				yield return d;
 			}
 		}
 	}

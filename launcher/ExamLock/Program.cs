@@ -14,6 +14,7 @@ internal static class Program
 		AppDirs.Ensure();
 		PolicyGuard.RestoreIfNeeded();
 		AppDirs.CleanOldProfiles();
+		SelfDelete.CleanupLeftovers();
 		if (args.Contains("--restore"))
 		{
 			return 0;
@@ -70,8 +71,9 @@ internal static class Program
 			AppDirs.CleanOldProfiles();
 			if (examForm.FinishedNormally)
 			{
-				MessageBox.Show("İmtahandan çıxdınız. Nəticəniz müəllimə göndərildi.\n\nİmtahan proqramı bu kompüterdən avtomatik silinir.", "İmtahan bitdi", MessageBoxButtons.OK, MessageBoxIcon.Asterisk);
-				SelfDelete.Schedule(launchConfig);
+				// Məcburi «Sil» ekranı — tələbə basmadan bağlaya bilmir
+				using DeleteForm deleteForm = new DeleteForm();
+				Application.Run(deleteForm);
 			}
 			return 0;
 		}
