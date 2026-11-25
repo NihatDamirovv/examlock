@@ -86,14 +86,52 @@ db.exec(`
   db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(exam_id, machine_id)');
 }
 
+// Miqrasiya: müəllimlər — hər imtahan bir müəllimə məxsusdur
+db.exec(`
+  CREATE TABLE IF NOT EXISTS teachers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    pass_hash TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  );
+`);
+{
+  const cols = new Set(db.prepare('PRAGMA table_info(exams)').all().map((c) => c.name));
+  if (!cols.has('teacher_id')) db.exec('ALTER TABLE exams ADD COLUMN teacher_id TEXT REFERENCES teachers(id) ON DELETE SET NULL');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_exams_teacher ON exams(teacher_id)');
+  // İlk işə salınmada iki müəllim yaradılır (şifrəni admin paneldən təyin edir)
+  if (db.prepare('SELECT COUNT(*) AS n FROM teachers').get().n === 0) {
+    const ins = db.prepare('INSERT INTO teachers (id, name, pass_hash, active, created_at) VALUES (?, ?, NULL, 1, ?)');
+    ins.run(crypto.randomUUID(), 'Sabina Nağıyeva', Date.now());
+    ins.run(crypto.randomUUID(), 'Dilarə Quluzadə', Date.now() + 1);
+  }
+}
+
 const q = {
   examById: db.prepare('SELECT * FROM exams WHERE id = ?'),
   examByCode: db.prepare('SELECT * FROM exams WHERE code = ?'),
-  examsAll: db.prepare('SELECT * FROM exams ORDER BY created_at DESC'),
-  examInsert: db.prepare(`INSERT INTO exams (id, code, client_key, title, url, extra_domains, quit_hash, active, created_at)
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-  examUpdate: db.prepare('UPDATE exams SET title = ?, url = ?, extra_domains = ?, quit_hash = ?, active = ? WHERE id = ?'),
-  examDelete: db.prepare('DELETE FROM exams WHERE id = ?'),
+  examsAll: db.prepare(`SELECT e.*, t.name AS teacher_name FROM exams e
+                        LEFT JOIN teachers t ON t.id = e.teacher_id ORDER BY e.created_at DESC`),
+  // Müəllim yalnız ÖZ imtahanlarını görür — bütün müəllim sorğuları bu iki sorğudan keçir
+  examsByTeacher: db.prepare('SELECT * FROM exams WHERE teacher_id = ? ORDER BY created_at DESC'),
+  examOfTeacher: db.prepare('SELECT * FROM exams WHERE id = ? AND teacher_id = ?'),
+  examInsert: db.prepare(`INSERT INTO exams (id, code, client_key, title, url, extra_domains, quit_hash, active, created_at, teacher_id)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+  examUpdate: db.prepare('UPDATE exams SET title = ?, url = ?, extra_domains = ?, quit_hash = ?, active = ? WHERE id = ? AND teacher_id = ?'),
+  examDelete: db.prepare('DELETE FROM exams WHERE id = ? AND teacher_id = ?'),
+  examAssign: db.prepare('UPDATE exams SET teacher_id = ? WHERE id = ?'),
+  teachersAll: db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM exams e WHERE e.teacher_id = t.id) AS exam_count
+                           FROM teachers t ORDER BY t.created_at ASC`),
+  teachersPublic: db.prepare('SELECT id, name FROM teachers WHERE active = 1 AND pass_hash IS NOT NULL ORDER BY created_at ASC'),
+  teacherById: db.prepare('SELECT * FROM teachers WHERE id = ?'),
+  teacherInsert: db.prepare('INSERT INTO teachers (id, name, pass_hash, active, created_at) VALUES (?, ?, ?, 1, ?)'),
+  teacherRename: db.prepare('UPDATE teachers SET name = ? WHERE id = ?'),
+  teacherSetPass: db.prepare('UPDATE teachers SET pass_hash = ? WHERE id = ?'),
+  teacherSetActive: db.prepare('UPDATE teachers SET active = ? WHERE id = ?'),
+  teacherDelete: db.prepare('DELETE FROM teachers WHERE id = ?'),
+  sessionOfTeacher: db.prepare(`SELECT s.* FROM sessions s JOIN exams e ON e.id = s.exam_id
+                                WHERE s.id = ? AND e.teacher_id = ?`),
   examStats: db.prepare(`SELECT COUNT(*) AS sessions,
                                 COALESCE(SUM(CASE WHEN ended_at IS NULL AND last_seen > ? THEN 1 ELSE 0 END), 0) AS online,
                                 COALESCE(SUM(violations), 0) AS violations
@@ -249,6 +287,19 @@ function validateExamInput(body, existing) {
   return { title, url: url.toString(), extraDomains: domains.join('\n'), quitHash, active: body.active ? 1 : 0, code };
 }
 
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return `${salt}:${crypto.scryptSync(pw, salt, 64).toString('hex')}`;
+}
+function verifyPassword(pw, stored) {
+  if (!stored) return false;
+  const [salt, hash] = stored.split(':');
+  if (!salt || !hash) return false;
+  const a = Buffer.from(hash, 'hex');
+  const b = crypto.scryptSync(String(pw), salt, 64);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function examJson(exam, req) {
   const st = q.examStats.get(now() - ONLINE_WINDOW_MS, exam.id);
   return {
@@ -284,9 +335,14 @@ app.use((req, res, next) => {
 });
 app.use('/static', express.static(path.join(ROOT, 'public', 'static'), { maxAge: '1h' }));
 
-// ---------------------------------------------------------------- admin girişi
-const COOKIE = 'el_admin';
+// ---------------------------------------------------------------- giriş (admin + müəllimlər)
+// Rollar:
+//   admin   — yalnız ADMIN_PASSWORD ilə; müəllimləri idarə edir (/admin)
+//   teacher — admin tərəfindən yaradılır; yalnız öz imtahanlarını görür (/panel)
+const COOKIE = 'el_auth';
 const passTag = sha256hex(ADMIN_PASSWORD).slice(0, 16); // şifrə dəyişəndə köhnə girişlər etibarsız olur
+// Müəllimin şifrəsi dəyişəndə və ya hesabı bağlananda köhnə girişləri etibarsız olur
+const teacherTag = (t) => sha256hex(`${t.pass_hash}|${t.active}`).slice(0, 16);
 
 function parseCookies(req) {
   const out = {};
@@ -297,83 +353,220 @@ function parseCookies(req) {
   return out;
 }
 
-function isAdmin(req) {
+// Cookie formatı: <rol>.<id>.<bitmə vaxtı>.<imza>
+function whoAmI(req) {
   const v = parseCookies(req)[COOKIE];
-  if (!v) return false;
-  const [exp, sig] = v.split('.');
-  return Number(exp) > now() && safeEqual(sig, hmac(`admin.${passTag}.${exp}`));
+  if (!v) return null;
+  const [role, id, exp, sig] = v.split('.');
+  if (!(Number(exp) > now())) return null;
+  if (role === 'a') {
+    return safeEqual(sig, hmac(`a.admin.${exp}.${passTag}`)) ? { role: 'admin' } : null;
+  }
+  if (role === 't') {
+    const t = q.teacherById.get(id);
+    if (!t || !t.active || !t.pass_hash) return null;
+    return safeEqual(sig, hmac(`t.${id}.${exp}.${teacherTag(t)}`)) ? { role: 'teacher', teacher: t } : null;
+  }
+  return null;
 }
 
-function setAdminCookie(req, res) {
+function setAuthCookie(req, res, role, id, tag) {
   const exp = now() + ADMIN_TTL_MS;
   const secure = req.secure ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `${COOKIE}=${exp}.${hmac(`admin.${passTag}.${exp}`)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ADMIN_TTL_MS / 1000}${secure}`);
+  const value = `${role}.${id}.${exp}.${hmac(`${role}.${id}.${exp}.${tag}`)}`;
+  res.setHeader('Set-Cookie', `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${ADMIN_TTL_MS / 1000}${secure}`);
+}
+
+function csrfOk(req) {
+  return req.method === 'GET' || req.get('x-requested-with') === 'fetch';
 }
 
 function requireAdmin(req, res, next) {
-  if (!isAdmin(req)) return res.status(401).json({ error: 'Giriş tələb olunur.' });
-  if (req.method !== 'GET' && req.get('x-requested-with') !== 'fetch') return res.status(403).json({ error: 'İcazə yoxdur.' });
+  const me = whoAmI(req);
+  if (me?.role !== 'admin') return res.status(401).json({ error: 'Giriş tələb olunur.' });
+  if (!csrfOk(req)) return res.status(403).json({ error: 'İcazə yoxdur.' });
   next();
 }
 
+function requireTeacher(req, res, next) {
+  const me = whoAmI(req);
+  if (me?.role !== 'teacher') return res.status(401).json({ error: 'Giriş tələb olunur.' });
+  if (!csrfOk(req)) return res.status(403).json({ error: 'İcazə yoxdur.' });
+  req.teacher = me.teacher;
+  next();
+}
+
+// Şifrə təxmin etməyə qarşı: IP üzrə 5 səhv cəhddən sonra 1 dəqiqə blok
 const loginAttempts = new Map();
-app.post('/admin/api/login', (req, res) => {
-  const key = req.ip;
-  const a = loginAttempts.get(key) || { n: 0, until: 0 };
-  if (a.until > now()) return res.status(429).json({ error: 'Çox cəhd edildi. Bir dəqiqə sonra yenidən yoxlayın.' });
-  if (!safeEqual(sha256hex(String(req.body?.password ?? '')), sha256hex(ADMIN_PASSWORD))) {
-    a.n += 1;
-    if (a.n >= 5) { a.n = 0; a.until = now() + 60_000; }
-    loginAttempts.set(key, a);
-    return res.status(401).json({ error: 'Şifrə səhvdir.' });
+function loginGuard(req, res) {
+  const a = loginAttempts.get(req.ip);
+  if (a && a.until > now()) {
+    res.status(429).json({ error: 'Çox cəhd edildi. Bir dəqiqə sonra yenidən yoxlayın.' });
+    return false;
   }
-  loginAttempts.delete(key);
-  setAdminCookie(req, res);
-  res.json({ ok: true });
+  return true;
+}
+function loginFailed(req) {
+  const a = loginAttempts.get(req.ip) || { n: 0, until: 0 };
+  a.n += 1;
+  if (a.n >= 5) { a.n = 0; a.until = now() + 60_000; }
+  loginAttempts.set(req.ip, a);
+}
+
+app.get('/api/teachers', (req, res) => {
+  res.json(q.teachersPublic.all());
 });
 
-app.post('/admin/api/logout', (req, res) => {
+app.post('/api/login/admin', (req, res) => {
+  if (!loginGuard(req, res)) return;
+  if (!safeEqual(sha256hex(String(req.body?.password ?? '')), sha256hex(ADMIN_PASSWORD))) {
+    loginFailed(req);
+    return res.status(401).json({ error: 'Şifrə səhvdir.' });
+  }
+  loginAttempts.delete(req.ip);
+  setAuthCookie(req, res, 'a', 'admin', passTag);
+  res.json({ ok: true, redirect: '/admin' });
+});
+
+app.post('/api/login/teacher', (req, res) => {
+  if (!loginGuard(req, res)) return;
+  const t = q.teacherById.get(String(req.body?.teacherId ?? ''));
+  if (!t || !t.active || !verifyPassword(String(req.body?.password ?? ''), t.pass_hash)) {
+    loginFailed(req);
+    return res.status(401).json({ error: 'Şifrə səhvdir.' });
+  }
+  loginAttempts.delete(req.ip);
+  setAuthCookie(req, res, 't', t.id, teacherTag(t));
+  res.json({ ok: true, redirect: '/panel' });
+});
+
+app.post('/api/logout', (req, res) => {
   res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
   res.json({ ok: true });
 });
 
-app.get('/', (req, res) => res.redirect('/admin'));
-app.get('/admin', (req, res) => res.sendFile(path.join(ROOT, 'public', 'admin.html')));
-
-app.get('/admin/api/me', requireAdmin, (req, res) => {
-  let launcherReady = true;
-  try { fs.accessSync(LAUNCHER_PATH); } catch { launcherReady = false; }
-  res.json({ ok: true, server: baseUrl(req), launcherReady });
+// ---------------------------------------------------------------- səhifələr
+app.get('/', (req, res) => {
+  const me = whoAmI(req);
+  if (me?.role === 'admin') return res.redirect('/admin');
+  if (me?.role === 'teacher') return res.redirect('/panel');
+  res.sendFile(path.join(ROOT, 'public', 'login.html'));
+});
+app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
+app.get('/admin', (req, res) => {
+  if (whoAmI(req)?.role !== 'admin') return res.redirect('/login#admin');
+  res.sendFile(path.join(ROOT, 'public', 'admin.html'));
+});
+app.get('/panel', (req, res) => {
+  if (whoAmI(req)?.role !== 'teacher') return res.redirect('/login');
+  res.sendFile(path.join(ROOT, 'public', 'teacher.html'));
 });
 
-app.get('/admin/api/exams', requireAdmin, (req, res) => {
-  res.json(q.examsAll.all().map((e) => examJson(e, req)));
+// ---------------------------------------------------------------- admin API (yalnız müəllim idarəsi)
+function teacherJson(t) {
+  return { id: t.id, name: t.name, active: !!t.active, hasPassword: !!t.pass_hash, examCount: t.exam_count ?? 0, createdAt: t.created_at };
+}
+
+function validateTeacherName(raw) {
+  const name = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  if (name.length < 3 || name.length > 80) return { error: 'Müəllimin ad və soyadını yazın (3–80 simvol).' };
+  return { name };
+}
+function validateTeacherPassword(raw) {
+  const pw = String(raw ?? '');
+  if (pw.length < 6 || pw.length > 100) return { error: 'Şifrə ən azı 6 simvol olmalıdır.' };
+  return { pw };
+}
+
+app.get('/admin/api/teachers', requireAdmin, (req, res) => {
+  res.json(q.teachersAll.all().map(teacherJson));
 });
 
-app.post('/admin/api/exams', requireAdmin, (req, res) => {
-  const v = validateExamInput(req.body || {}, null);
-  if (v.error) return res.status(400).json({ error: v.error });
-  const id = crypto.randomUUID();
-  q.examInsert.run(id, v.code, token(24), v.title, v.url, v.extraDomains, v.quitHash, v.active, now());
-  res.json(examJson(q.examById.get(id), req));
-});
-
-app.put('/admin/api/exams/:id', requireAdmin, (req, res) => {
-  const exam = q.examById.get(req.params.id);
-  if (!exam) return res.status(404).json({ error: 'İmtahan tapılmadı.' });
-  const v = validateExamInput(req.body || {}, exam);
-  if (v.error) return res.status(400).json({ error: v.error });
-  q.examUpdate.run(v.title, v.url, v.extraDomains, v.quitHash, v.active, exam.id);
-  res.json(examJson(q.examById.get(exam.id), req));
-});
-
-app.delete('/admin/api/exams/:id', requireAdmin, (req, res) => {
-  q.examDelete.run(req.params.id);
+app.post('/admin/api/teachers', requireAdmin, (req, res) => {
+  const n = validateTeacherName(req.body?.name);
+  if (n.error) return res.status(400).json({ error: n.error });
+  const p = validateTeacherPassword(req.body?.password);
+  if (p.error) return res.status(400).json({ error: p.error });
+  q.teacherInsert.run(crypto.randomUUID(), n.name, hashPassword(p.pw), now());
   res.json({ ok: true });
 });
 
-app.get('/admin/api/exams/:id/sessions', requireAdmin, (req, res) => {
+app.put('/admin/api/teachers/:id', requireAdmin, (req, res) => {
+  const t = q.teacherById.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'Müəllim tapılmadı.' });
+  const b = req.body || {};
+  if (b.name !== undefined) {
+    const n = validateTeacherName(b.name);
+    if (n.error) return res.status(400).json({ error: n.error });
+    q.teacherRename.run(n.name, t.id);
+  }
+  if (b.password) {
+    const p = validateTeacherPassword(b.password);
+    if (p.error) return res.status(400).json({ error: p.error });
+    q.teacherSetPass.run(hashPassword(p.pw), t.id);
+  }
+  if (b.active !== undefined) q.teacherSetActive.run(b.active ? 1 : 0, t.id);
+  res.json({ ok: true });
+});
+
+app.delete('/admin/api/teachers/:id', requireAdmin, (req, res) => {
+  const t = q.teacherById.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'Müəllim tapılmadı.' });
+  // Müəllimin imtahanları silinmir — sahibsiz qalır, admin başqa müəllimə verə bilər
+  q.teacherDelete.run(t.id);
+  res.json({ ok: true });
+});
+
+// Admin bütün imtahanları yalnız siyahı kimi görür (müəllim adı ilə) və sahibini dəyişə bilər
+app.get('/admin/api/exams', requireAdmin, (req, res) => {
+  res.json(q.examsAll.all().map((e) => ({ ...examJson(e, req), teacherId: e.teacher_id, teacherName: e.teacher_name })));
+});
+
+app.put('/admin/api/exams/:id/owner', requireAdmin, (req, res) => {
   const exam = q.examById.get(req.params.id);
+  if (!exam) return res.status(404).json({ error: 'İmtahan tapılmadı.' });
+  const tid = req.body?.teacherId ? String(req.body.teacherId) : null;
+  if (tid && !q.teacherById.get(tid)) return res.status(400).json({ error: 'Müəllim tapılmadı.' });
+  q.examAssign.run(tid, exam.id);
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- müəllim API (yalnız öz imtahanları)
+app.get('/panel/api/me', requireTeacher, (req, res) => {
+  let launcherReady = true;
+  try { fs.accessSync(LAUNCHER_PATH); } catch { launcherReady = false; }
+  res.json({ ok: true, name: req.teacher.name, server: baseUrl(req), launcherReady });
+});
+
+app.get('/panel/api/exams', requireTeacher, (req, res) => {
+  res.json(q.examsByTeacher.all(req.teacher.id).map((e) => examJson(e, req)));
+});
+
+app.post('/panel/api/exams', requireTeacher, (req, res) => {
+  const v = validateExamInput(req.body || {}, null);
+  if (v.error) return res.status(400).json({ error: v.error });
+  const id = crypto.randomUUID();
+  q.examInsert.run(id, v.code, token(24), v.title, v.url, v.extraDomains, v.quitHash, v.active, now(), req.teacher.id);
+  res.json(examJson(q.examById.get(id), req));
+});
+
+app.put('/panel/api/exams/:id', requireTeacher, (req, res) => {
+  const exam = q.examOfTeacher.get(req.params.id, req.teacher.id);
+  if (!exam) return res.status(404).json({ error: 'İmtahan tapılmadı.' });
+  const v = validateExamInput(req.body || {}, exam);
+  if (v.error) return res.status(400).json({ error: v.error });
+  q.examUpdate.run(v.title, v.url, v.extraDomains, v.quitHash, v.active, exam.id, req.teacher.id);
+  res.json(examJson(q.examById.get(exam.id), req));
+});
+
+app.delete('/panel/api/exams/:id', requireTeacher, (req, res) => {
+  const r = q.examDelete.run(req.params.id, req.teacher.id);
+  if (!r.changes) return res.status(404).json({ error: 'İmtahan tapılmadı.' });
+  res.json({ ok: true });
+});
+
+app.get('/panel/api/exams/:id/sessions', requireTeacher, (req, res) => {
+  const exam = q.examOfTeacher.get(req.params.id, req.teacher.id);
   if (!exam) return res.status(404).json({ error: 'İmtahan tapılmadı.' });
   const events = new Map();
   for (const e of q.eventsByExam.all(exam.id)) {
@@ -401,16 +594,17 @@ app.get('/admin/api/exams/:id/sessions', requireAdmin, (req, res) => {
 });
 
 // Müəllim: bu tələbənin kompüterindən imtahana yenidən girməyə icazə ver
-app.post('/admin/api/sessions/:id/reentry', requireAdmin, (req, res) => {
-  const s = q.sessionById.get(req.params.id);
+app.post('/panel/api/sessions/:id/reentry', requireTeacher, (req, res) => {
+  const s = q.sessionOfTeacher.get(req.params.id, req.teacher.id);
   if (!s) return res.status(404).json({ error: 'Sessiya tapılmadı.' });
   if (s.machine_id) q.allowReentry.run(s.exam_id, s.machine_id);
   res.json({ ok: true });
 });
 
-app.get('/admin/download/:id', (req, res) => {
-  if (!isAdmin(req)) return res.redirect('/admin');
-  const exam = q.examById.get(req.params.id);
+app.get('/panel/download/:id', (req, res) => {
+  const me = whoAmI(req);
+  if (me?.role !== 'teacher') return res.redirect('/login');
+  const exam = q.examOfTeacher.get(req.params.id, me.teacher.id);
   if (!exam) return res.status(404).type('text').send('İmtahan tapılmadı.');
   sendLauncher(req, res, exam);
 });
